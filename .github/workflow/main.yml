@@ -1,0 +1,162 @@
+name: Deploy Laravel to VPS
+
+on:
+  push:
+    branches:
+      - main
+      - development
+      - feature/*
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+
+      - name: Install rsync and SSH setup
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan ${{ secrets.HOST }} >> ~/.ssh/known_hosts
+
+      - name: Copy .env file
+        run: |
+          if [ ! -f .env ]; then
+            echo "Error: .env file not found in the repository."
+            exit 1
+          fi
+
+      - name: Install Composer dependencies
+        run: composer install --no-dev --optimize-autoloader
+
+      - name: Set Environment Variables
+        run: |
+          echo "APP_KEY=${{ secrets.APP_KEY }}" >> .env
+          echo "DB_CONNECTION=${{ secrets.DB_CONNECTION }}" >> .env
+          echo "DB_HOST=${{ secrets.DB_HOST }}" >> .env
+          echo "DB_PORT=${{ secrets.DB_PORT }}" >> .env
+          echo "DB_DATABASE=${{ secrets.DB_DATABASE }}" >> .env
+          echo "DB_USERNAME=${{ secrets.DB_USERNAME }}" >> .env
+          echo "DB_PASSWORD=${{ secrets.DB_PASSWORD }}" >> .env
+
+      - name: Check and free port 80
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            sudo lsof -ti:80 | xargs --no-run-if-empty sudo kill -9
+          "
+
+      - name: Deploy to VPS
+        run: |
+          rsync -avz --exclude=node_modules --exclude=.git --exclude=.github ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:/var/www/html/laravel-app/
+
+      - name: Set up application on server
+        run: |
+          ssh -T ${{ secrets.USERNAME }}@${{ secrets.HOST }} << 'EOF'
+            cd /var/www/html/laravel-app
+            composer install --no-dev --optimize-autoloader
+            php artisan migrate --force
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+            chown -R www-data:www-data .
+            chmod -R 755 storage bootstrap/cache
+          EOF
+
+      - name: Stop and remove all containers and networks
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            cd /var/www/html/laravel-app
+            docker-compose down --volumes --remove-orphans
+            docker network prune -f
+            docker rm -f $(docker ps -aq) || true
+            docker volume prune -f
+          "
+
+      - name: Remove existing network if it exists
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            docker network rm laravel-app_app-network || true
+          "
+
+      - name: Create .env file
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            cd /var/www/html/laravel-app
+            cat << EOF > .env
+            APP_NAME=${{ secrets.APP_NAME }}
+            APP_ENV=${{ secrets.APP_ENV }}
+            APP_KEY=${{ secrets.APP_KEY }}
+            APP_DEBUG=${{ secrets.APP_DEBUG }}
+            APP_URL=${{ secrets.APP_URL }}
+            
+            DB_CONNECTION=${{ secrets.DB_CONNECTION }}
+            DB_HOST=postgres
+            DB_PORT=5432
+            DB_DATABASE=${{ secrets.DB_DATABASE }}
+            DB_USERNAME=${{ secrets.DB_USERNAME }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+            
+            REDIS_HOST=redis
+            REDIS_PASSWORD=null
+            REDIS_PORT=6379
+            
+            # Add any other necessary environment variables here
+            EOF
+          "
+
+      - name: Cache Laravel configuration
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            cd /var/www/html/laravel-app
+            php artisan config:cache
+          "
+
+      - name: Prune Docker system
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            docker system prune -af --volumes
+          "
+
+      - name: Install Node.js and npm
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            curl -fsSL https://deb.nodesource.com/setup_16.x | sudo -E bash -
+            sudo apt-get install -y nodejs
+          "
+
+      - name: Install NPM dependencies and build assets
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            cd /var/www/html/laravel-app
+            npm ci
+            npm run build
+          "
+
+      - name: Clear Laravel cache
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            cd /var/www/html/laravel-app
+            php artisan cache:clear
+            php artisan config:clear
+            php artisan view:clear
+          "
+
+      - name: Deploy and start containers
+        run: |
+          ssh ${{ secrets.USERNAME }}@${{ secrets.HOST }} "
+            cd /var/www/html/laravel-app
+            docker network create laravel-app_app-network || true
+            docker-compose up -d --build --force-recreate
+          "

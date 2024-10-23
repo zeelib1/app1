@@ -1,0 +1,46 @@
+name: Deploy Laravel Apps
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: ${{ fromJson(steps.set-matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Set up matrix
+        id: set-matrix
+        run: |
+          content=`cat ./app_config.yml`
+          matrix=`echo "$content" | yq eval '.apps' -o json | jq -c .`
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+
+      - name: Deploy to VPS
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SERVER_IP: ${{ secrets.SERVER_IP }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_PRIVATE_KEY" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H $SERVER_IP >> ~/.ssh/known_hosts
+
+          rsync -avz --exclude='.git' --exclude='node_modules' ./ $SERVER_USER@$SERVER_IP:/var/www/${{ matrix.app.name }}/
+
+          ssh $SERVER_USER@$SERVER_IP << EOF
+            cd /var/www/${{ matrix.app.name }}
+            docker-compose down
+            docker-compose up -d --build
+            docker-compose exec -T app php artisan migrate --force
+            docker-compose exec -T app php artisan config:cache
+            docker-compose exec -T app php artisan route:cache
+            docker-compose exec -T app php artisan view:cache
+          EOF

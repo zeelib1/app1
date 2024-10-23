@@ -1,0 +1,73 @@
+name: Deploy Laravel to VPS
+
+on:
+  push:
+    branches:
+      - main
+      - development
+      - feature/*
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+
+      - name: Install rsync and SSH setup
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y rsync
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan ${{ secrets.HOST }} >> ~/.ssh/known_hosts
+
+      - name: Copy .env file
+        run: php -r "file_exists('.env') || copy('.env.example', '.env');"
+
+      - name: Install Composer dependencies
+        run: composer install --no-dev --optimize-autoloader
+
+      - name: Set Environment Variables
+        run: |
+          echo "APP_KEY=${{ secrets.APP_KEY }}" >> .env
+          echo "DB_CONNECTION=${{ secrets.DB_CONNECTION }}" >> .env
+          echo "DB_HOST=${{ secrets.DB_HOST }}" >> .env
+          echo "DB_PORT=${{ secrets.DB_PORT }}" >> .env
+          echo "DB_DATABASE=${{ secrets.DB_DATABASE }}" >> .env
+          echo "DB_USERNAME=${{ secrets.DB_USERNAME }}" >> .env
+          echo "DB_PASSWORD=${{ secrets.DB_PASSWORD }}" >> .env
+
+      - name: Deploy to VPS
+        run: |
+          rsync -avz --exclude=node_modules --exclude=.git --exclude=.github ./ ${{ secrets.USERNAME }}@${{ secrets.HOST }}:/var/www/html/laravel-app/
+
+      - name: Set up application on server
+        run: |
+          ssh -T ${{ secrets.USERNAME }}@${{ secrets.HOST }} << 'EOF'
+            cd /var/www/html/laravel-app
+            composer install --no-dev --optimize-autoloader
+            php artisan migrate --force
+            php artisan config:cache
+            php artisan route:cache
+            php artisan view:cache
+            chown -R www-data:www-data .
+            chmod -R 755 storage bootstrap/cache
+          EOF
+
+      - name: Restart Docker containers
+        run: |
+          ssh -T ${{ secrets.USERNAME }}@${{ secrets.HOST }} << 'EOF'
+            cd /var/www/html/laravel-app
+            docker-compose down
+            docker-compose up -d --build
+          EOF

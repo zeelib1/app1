@@ -1,0 +1,7 @@
+apps:
+  - name: app1
+    domain: app1.testiranje.de
+    port: 8001
+  - name: app2
+    domain: app2.testiranje.de
+    port: 8002
